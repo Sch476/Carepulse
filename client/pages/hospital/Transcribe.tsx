@@ -1,11 +1,13 @@
-import { useState, useEffect } from "react";
+// client/pages/hospital/Transcribe.tsx
+
+import React, { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
-  CardHeader,
-  CardTitle,
   CardDescription,
   CardFooter,
+  CardHeader,
+  CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,204 +24,361 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 
+import { extractClinicalSummary } from "@/shared/extractClinicalSummary";
+import type { ClinicalSummary } from "@/shared/clinicalSchema";
+
+type SpeechRecognitionType =
+  | (SpeechRecognition & { continuous?: boolean; interimResults?: boolean })
+  | null;
+
+const getSpeechRecognition = (): SpeechRecognitionType => {
+  if (typeof window === "undefined") return null;
+
+  const SpeechRecognitionCtor =
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition;
+
+  if (!SpeechRecognitionCtor) return null;
+
+  const recognition = new SpeechRecognitionCtor();
+  recognition.lang = "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  return recognition as SpeechRecognitionType;
+};
+
 export default function VoiceTranscribe() {
   const [isRecording, setIsRecording] = useState(false);
   const [transcribedText, setTranscribedText] = useState("");
   const [progress, setProgress] = useState(0);
+  const [isSupported, setIsSupported] = useState(true);
 
+  const recognitionRef = useRef<SpeechRecognitionType>(null);
+  const fullTextRef = useRef<string>("");
+
+  const [summary, setSummary] = useState<ClinicalSummary>({
+    diagnosis: null,
+    location: null,
+    severity: null,
+    treatment: null,
+    duration: null,
+  });
+
+  // Initialize SpeechRecognition once
   useEffect(() => {
-    let interval: any;
-    if (isRecording) {
-      interval = setInterval(() => {
-        setProgress((prev) => (prev >= 100 ? 0 : prev + 2));
-      }, 50);
-    } else {
-      setProgress(0);
-      clearInterval(interval);
+    const recognition = getSpeechRecognition();
+
+    if (!recognition) {
+      setIsSupported(false);
+      return;
     }
+
+    recognitionRef.current = recognition;
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let finalText = fullTextRef.current;
+      let interimText = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalText += transcript + " ";
+        } else {
+          interimText += transcript;
+        }
+      }
+
+      fullTextRef.current = finalText;
+      setTranscribedText((finalText + " " + interimText).trim());
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error:", event.error);
+
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
+        toast.error(
+          "Microphone permission was blocked. Open the app in a normal browser tab and allow mic access."
+        );
+      } else if (event.error === "network") {
+        toast.error(
+          "Speech service network error. This often happens in Codespaces; try running locally."
+        );
+      } else {
+        toast.error(
+          `Voice recognition error: ${event.error || "Unknown error"}`
+        );
+      }
+
+      setIsRecording(false);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+    };
+  }, []);
+
+  // Fake “recording progress” animation while recording
+  useEffect(() => {
+    if (!isRecording) {
+      setProgress(0);
+      return;
+    }
+
+    let progressValue = 0;
+    const interval = setInterval(() => {
+      progressValue += 5;
+      if (progressValue > 100) progressValue = 10;
+      setProgress(progressValue);
+    }, 300);
+
     return () => clearInterval(interval);
   }, [isRecording]);
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      setIsRecording(false);
-      // Simulate transcription result
-      const mockText =
-        "Patient presents with persistent cough and mild fever. Recommending immediate blood work and chest X-ray. Vital signs are stable but monitoring for respiratory distress. Prescription for ibuprofen 400mg issued.";
-      setTranscribedText((prev) => prev + (prev ? " " : "") + mockText);
-      toast.success("Transcription complete");
-    } else {
+  // Recompute "important words" summary whenever transcript changes
+  useEffect(() => {
+    if (!transcribedText) {
+      setSummary({
+        diagnosis: null,
+        location: null,
+        severity: null,
+        treatment: null,
+        duration: null,
+      });
+      return;
+    }
+
+    const s = extractClinicalSummary(transcribedText);
+    setSummary(s);
+  }, [transcribedText]);
+
+  const handleStartRecording = () => {
+    if (!recognitionRef.current) {
+      toast.error("This browser does not support voice transcription.");
+      setIsSupported(false);
+      return;
+    }
+
+    if (isRecording) return;
+
+    try {
+      fullTextRef.current = transcribedText ? transcribedText + " " : "";
+      recognitionRef.current.start();
       setIsRecording(true);
-      toast.info("Listening...");
+      toast.success("Listening…");
+    } catch (err: any) {
+      console.error("Error starting recognition:", err);
+      if (err.name === "InvalidStateError") {
+        toast.error("Recognition is already running. Try stopping first.");
+      } else {
+        toast.error("Unable to start recording.");
+      }
     }
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(transcribedText);
-    toast.success("Copied to clipboard");
+  const handleStopRecording = () => {
+    if (!recognitionRef.current) return;
+
+    try {
+      recognitionRef.current.stop();
+      setIsRecording(false);
+      setProgress(100);
+    } catch (err) {
+      console.error("Error stopping recognition:", err);
+    }
+  };
+
+  const handleReset = () => {
+    fullTextRef.current = "";
+    setTranscribedText("");
+    setProgress(0);
+    setIsRecording(false);
+  };
+
+  const handleCopy = async () => {
+    if (!transcribedText) {
+      toast.message("Nothing to copy yet.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(transcribedText);
+      toast.success("Transcription copied to clipboard.");
+    } catch {
+      toast.error("Failed to copy.");
+    }
+  };
+
+  const handleSave = () => {
+    if (!transcribedText) {
+      toast.message("No transcription to save.");
+      return;
+    }
+    // Here you can send both transcribedText and summary to your backend
+    toast.success("Transcription saved (stub).");
+  };
+
+  const handleSummarize = () => {
+    if (!transcribedText) {
+      toast.message("Transcribe something first.");
+      return;
+    }
+    // Stub for later LLM integration
+    toast.success("Summarization triggered (stub).");
+  };
+
+  const handleClinicalNote = () => {
+    if (!transcribedText) {
+      toast.message("Transcribe something first.");
+      return;
+    }
+    // Stub for later clinical note generation
+    toast.success("Clinical note generation triggered (stub).");
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="text-center space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight">
-          AI Voice Transcription
-        </h1>
-        <p className="text-muted-foreground">
-          Reduce click fatigue by dictating clinical notes directly.
-        </p>
-      </div>
-
-      <div className="grid gap-8 md:grid-cols-3">
-        <Card className="md:col-span-1 border-none shadow-sm flex flex-col items-center justify-center p-8 text-center bg-primary/5 border border-primary/10">
-          <div className="relative mb-6">
-            <div
-              className={`absolute -inset-4 bg-primary/20 rounded-full blur-xl transition-all duration-500 ${isRecording ? "opacity-100 scale-125 animate-pulse" : "opacity-0 scale-100"}`}
-            />
-            <Button
-              size="lg"
-              className={`w-24 h-24 rounded-full shadow-xl transition-all active:scale-95 ${isRecording ? "bg-destructive hover:bg-destructive" : "bg-primary hover:bg-primary/90"}`}
-              onClick={toggleRecording}
-            >
-              {isRecording ? (
-                <Square className="w-10 h-10" />
-              ) : (
-                <Mic className="w-10 h-10" />
-              )}
-            </Button>
-          </div>
-          <h3 className="text-xl font-bold mb-2">
-            {isRecording ? "Recording..." : "Start Dictation"}
-          </h3>
-          <p className="text-sm text-muted-foreground mb-6">
-            {isRecording
-              ? "Transcribing your voice in real-time"
-              : "Click the microphone to begin dictating your notes"}
-          </p>
-          {isRecording && (
-            <div className="w-full space-y-2">
-              <div className="flex justify-between text-xs font-medium">
-                <span>Audio Level</span>
-                <span>Active</span>
-              </div>
-              <Progress value={progress} className="h-2" />
-            </div>
-          )}
-        </Card>
-
-        <Card className="md:col-span-2 border-none shadow-sm flex flex-col">
-          <CardHeader className="flex flex-row items-center justify-between">
+    <div className="flex justify-center px-4 py-8">
+      <Card className="max-w-3xl w-full shadow-lg border border-slate-200">
+        <CardHeader>
+          <div className="flex items-center justify-between">
             <div>
-              <CardTitle>Transcribed Text</CardTitle>
+              <CardTitle className="text-2xl font-semibold">
+                Voice Transcription
+              </CardTitle>
               <CardDescription>
-                Review and edit your clinical notes.
+                Tap the mic, speak, and we&apos;ll convert your voice into text
+                and key clinical details.
               </CardDescription>
             </div>
-            <Badge variant="secondary" className="gap-1">
-              <Sparkles className="w-3 h-3" />
-              AI Enhanced
+            <Badge variant={isRecording ? "destructive" : "outline"}>
+              {isRecording ? "Recording" : "Idle"}
             </Badge>
-          </CardHeader>
-          <CardContent className="flex-1 flex flex-col gap-4">
-            <div className="relative flex-1 min-h-[300px]">
-              <Textarea
-                placeholder="Transcribed text will appear here..."
-                className="w-full h-full min-h-[300px] resize-none p-4 text-lg border-slate-100 focus-visible:ring-primary/20 leading-relaxed"
-                value={transcribedText}
-                onChange={(e) => setTranscribedText(e.target.value)}
-              />
-              {!transcribedText && !isRecording && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300 pointer-events-none">
-                  <MessageSquareQuote className="w-12 h-12 mb-2" />
-                  <p>No text yet</p>
-                </div>
-              )}
+          </div>
+          {!isSupported && (
+            <p className="mt-2 text-xs text-red-500">
+              Your browser does not support the Web Speech API. Try using a
+              Chromium-based browser.
+            </p>
+          )}
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Progress value={progress} className="flex-1" />
+            <span className="text-xs text-muted-foreground w-12 text-right">
+              {Math.round(progress)}%
+            </span>
+          </div>
+
+          <Textarea
+            className="min-h-[220px] resize-y"
+            placeholder="Doctor's speech transcription will appear here..."
+            value={transcribedText}
+            onChange={(e) => {
+              fullTextRef.current = e.target.value;
+              setTranscribedText(e.target.value);
+            }}
+          />
+
+          <div className="mt-2 border rounded-md p-3 bg-slate-50 space-y-1">
+            <p className="text-sm font-semibold">Extracted clinical details</p>
+            <p className="text-xs text-muted-foreground">
+              Auto-filled from speech; doctor should review and edit before
+              saving.
+            </p>
+
+            <div className="grid gap-2 sm:grid-cols-2 text-sm mt-2">
+              <div>
+                <span className="font-medium">Diagnosis: </span>
+                <span>{summary.diagnosis ?? "—"}</span>
+              </div>
+              <div>
+                <span className="font-medium">Location: </span>
+                <span>{summary.location ?? "—"}</span>
+              </div>
+              <div>
+                <span className="font-medium">Severity: </span>
+                <span>{summary.severity ?? "—"}</span>
+              </div>
+              <div>
+                <span className="font-medium">Duration: </span>
+                <span>{summary.duration ?? "—"}</span>
+              </div>
+              <div className="sm:col-span-2">
+                <span className="font-medium">Treatment: </span>
+                <span>{summary.treatment ?? "—"}</span>
+              </div>
             </div>
-          </CardContent>
-          <CardFooter className="border-t border-slate-100 p-4 flex justify-between gap-2">
+          </div>
+        </CardContent>
+
+        <CardFooter className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap gap-2">
+            {!isRecording ? (
+              <Button
+                size="sm"
+                onClick={handleStartRecording}
+                disabled={!isSupported}
+              >
+                <Mic className="mr-2 h-4 w-4" />
+                Start
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={handleStopRecording}
+              >
+                <Square className="mr-2 h-4 w-4" />
+                Stop
+              </Button>
+            )}
+
             <Button
-              variant="ghost"
-              className="gap-2"
-              onClick={() => setTranscribedText("")}
+              size="sm"
+              variant="outline"
+              onClick={handleReset}
+              disabled={isRecording && !!transcribedText}
+            >
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Reset
+            </Button>
+
+            <Button size="sm" variant="outline" onClick={handleCopy}>
+              <Copy className="mr-2 h-4 w-4" />
+              Copy
+            </Button>
+
+            <Button size="sm" variant="outline" onClick={handleSave}>
+              <Save className="mr-2 h-4 w-4" />
+              Save
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleSummarize}
               disabled={!transcribedText}
             >
-              <RotateCcw className="w-4 h-4" />
-              Clear
+              <Sparkles className="mr-2 h-4 w-4" />
+              Summarize
             </Button>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                className="gap-2"
-                onClick={copyToClipboard}
-                disabled={!transcribedText}
-              >
-                <Copy className="w-4 h-4" />
-                Copy
-              </Button>
-              <Button className="gap-2" disabled={!transcribedText}>
-                <Save className="w-4 h-4" />
-                Save Note
-              </Button>
-            </div>
-          </CardFooter>
-        </Card>
-      </div>
 
-      <Card className="border-none shadow-sm overflow-hidden">
-        <CardHeader className="bg-slate-50 border-b border-slate-100">
-          <CardTitle className="text-sm font-bold uppercase tracking-widest text-slate-500">
-            Recently Transcribed
-          </CardTitle>
-        </CardHeader>
-        <div className="divide-y divide-slate-100">
-          {[
-            {
-              id: "1",
-              date: "2 mins ago",
-              preview: "Patient exhibits symptoms of acute bronchitis...",
-              duration: "1:45",
-            },
-            {
-              id: "2",
-              date: "15 mins ago",
-              preview:
-                "Follow-up on post-operative recovery for knee replacement...",
-              duration: "3:12",
-            },
-            {
-              id: "3",
-              date: "1 hour ago",
-              preview: "Routine checkup for patient with type 2 diabetes...",
-              duration: "0:58",
-            },
-          ].map((note) => (
-            <div
-              key={note.id}
-              className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors cursor-pointer group"
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleClinicalNote}
+              disabled={!transcribedText}
             >
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center text-slate-400 group-hover:bg-primary/10 group-hover:text-primary transition-colors">
-                  <Mic className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="font-medium text-slate-900 line-clamp-1">
-                    {note.preview}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {note.date} • {note.duration}
-                  </p>
-                </div>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="text-slate-400 group-hover:text-primary"
-              >
-                <Copy className="w-4 h-4" />
-              </Button>
-            </div>
-          ))}
-        </div>
+              <MessageSquareQuote className="mr-2 h-4 w-4" />
+              Clinical Note
+            </Button>
+          </div>
+        </CardFooter>
       </Card>
     </div>
   );
