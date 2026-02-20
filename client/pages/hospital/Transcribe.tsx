@@ -1,5 +1,7 @@
 // client/pages/hospital/Transcribe.tsx
 
+// import { extractClinicalSummary } from "@/shared/extractClinicalSummary";
+// import { ClinicalSummary } from "@/shared/clinicalSchema";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Card,
